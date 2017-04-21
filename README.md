@@ -121,6 +121,12 @@ Example:
 $ ./update-ecs-service --cluster test --service mytestproject \
 --container primary_service --wait --wait-timeout 600 mytestproject:v2
 ```
+
+Same tool can be used to bounce a service. In this case provide only cluster and service name:
+```bash
+$ ./update-ecs-service --cluster test --service mytestproject --wait --wait-timeout 600
+```
+
     
 ### delete-ecs-service
 Remove an ECS service. This includes deletion of Elastic Load Balancer.
