@@ -86,7 +86,7 @@ $ ./create-ecs-service --cluster test --profile default \
 ### update-ecs-service
 Deploy new Docker image, update service configuration or simply bounce the service.
 This tool creates a new Task Definition revision, and update the ECS service to use this new revision.
-If configured, **update-ecs-service** will wait for the deployment to complete. While waiting, this tool will poll ECS service events, so you see deployment goes and what's exactly happening with the service.
+If configured, **update-ecs-service** will wait for the deployment to complete. While waiting, this tool will poll ECS service events, so you see how the deployment goes and what's exactly happening with the service.
     
 ```
   --cluster CLUSTER     ECS Cluster name
