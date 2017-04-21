@@ -1,0 +1,148 @@
+#!/usr/bin/env python
+
+# This script deletes an ECS Service and assigned Load Balancer.
+# If ELB has a tag "created-by", script will match the username before delete.
+
+import argparse
+from time import sleep
+
+from botocore.exceptions import ClientError
+
+from build_utils import *
+
+
+def execFlow(client, elb_client, functions, args, context):
+    for func in functions:
+        function = retry.all[func.upper()]
+        counter = 0
+        passed = False
+        message = None
+        while counter < args.retry_count:
+            try:
+                function(client, elb_client, args, context)
+                passed = True
+                break
+            except ValueError as vex:
+                raise vex
+            except Exception as ex:
+                counter += 1
+                message = ex.message
+                print message
+                sleep(args.retry_interval)
+        if not passed:
+            raise Exception(
+                "FAILED! Could not execute function {name}: {message}".format(name=func,
+                                                                              message=message))
+
+
+@retry
+def delete_load_balancer(client, elb_client, args, context):
+    name = context["elb-name"]
+    log("{0}:{1}   Deleting load balancer".format(context["cluster"], name))
+    elb_client.delete_load_balancer(
+        LoadBalancerName=name
+    )
+    log("{0}:{1}   Load balancer deleted".format(context["cluster"], name))
+
+
+@retry
+def validate_user(client, elb_client, args, context):
+    name = context["elb-name"]
+    user = context["user"]
+    log("{0}:{1}   Valdating user...".format(context["cluster"], name))
+    try:
+        elb_data = elb_client.describe_tags(
+            LoadBalancerNames=[name]
+        )
+        if "TagDescriptions" in elb_data and len(elb_data["TagDescriptions"]) > 0:
+            for elb in elb_data["TagDescriptions"]:
+                for tag in elb["Tags"]:
+                    if tag["Key"] == "created-by" and tag["Value"] != user:
+                        raise ValueError("You cannot delete this service since it was not created by you!")
+
+        log("{0}:{1}   Validated.".format(context["cluster"], name))
+    except ClientError as ex:
+        if ex.response["Error"]["Code"] in ["LoadBalancerNotFound"]:
+            log("{0}:{1}   Load Balancer not found".format(context["cluster"], name))
+        else:
+            raise ex
+
+
+@retry
+def reset_ecs_service(client, elb_client, args, context):
+    name = context["name"]
+    cluster = context["cluster"]
+    log("{0}:{1}   Updating desired task count to 0".format(cluster, name))
+    try:
+        client.update_service(cluster=cluster, service=name, desiredCount=0)
+        log("{0}:{1}   Desired task count updated".format(cluster, name))
+    except ClientError as ex:
+        if ex.response["Error"]["Code"] in ["ServiceNotActiveException", "ServiceNotFoundException"]:
+            log("{0}:{1}   Service not found".format(cluster, name))
+        else:
+            raise ex
+
+
+@retry
+def delete_ecs_service(client, elb_client, args, context):
+    name = context["name"]
+    cluster = context["cluster"]
+    log("{0}:{1}   Deleting ECS service".format(cluster, name))
+    try:
+        services = client.describe_services(cluster=cluster, services=[name])
+        if "services" in services and len(services["services"]) > 0:
+            service = services["services"][0]
+            idTaskDefinition = service["taskDefinition"]
+            loadBalancers = service["loadBalancers"]
+            if len(loadBalancers) > 0:
+                context["load-balancer-name"] = loadBalancers[0]
+            client.update_service(cluster=cluster, service=name, desiredCount=0)
+            client.delete_service(cluster=cluster, service=name)
+            log("{0}:{1}   Amazon ECS: deleted service. Task definition {2} is not deleted.".format(cluster, name,
+                                                                                                    idTaskDefinition))
+    except ClientError as ex:
+        if ex.response["Error"]["Code"] in ["ServiceNotActiveException", "ServiceNotFoundException"]:
+            log("{0}:{1}   Service not found".format(cluster, name))
+        else:
+            raise ex
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--cluster", type=str, default="default", help="ECS Cluster name")
+parser.add_argument("--service", type=str, help="ECS Service name")
+parser.add_argument("--retry-count", type=int, default=5, help="Retry count for each AWS API call")
+parser.add_argument("--retry-interval", type=int, default=1, help="Retry interval for AWS API calls (seconds)")
+parser.add_argument("--profile", type=str, help="AWS user profile")
+parser.add_argument("-f", "--file", type=file, help="Input file with service name lines")
+parser.add_argument("--cluster-prefix", action='store_true', default=False,
+                    help="Search for service names prefixed with cluster name")
+parser.add_argument("--user", type=str, help="Jenkins user")
+
+args = parser.parse_args()
+
+session = boto3.Session(profile_name=args.profile)
+
+client = session.client('ecs')
+elb_client = session.client('elb')
+
+names = []
+if args.file != None:
+    text = args.file.read()
+    args.file.close()
+    names = text.split('\n')
+else:
+    names.append(args.service)
+
+functions = ["validate_user", "reset_ecs_service", "delete_ecs_service", "delete_load_balancer"]
+
+for name in names:
+    print "Deleting service {name}".format(name=name)
+    context = dict()
+    context["cluster"] = args.cluster
+    context["name"] = name[:32]
+    if args.cluster_prefix:
+        name = args.cluster + "-" + name
+    context["elb-name"] = name[:32]
+    context["user"] = args.user
+    execFlow(client=client, elb_client=elb_client, functions=functions, args=args, context=context)
+    print "Service deletion SUCCESSFUL!"

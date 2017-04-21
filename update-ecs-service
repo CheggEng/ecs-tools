@@ -1,0 +1,47 @@
+#!/usr/bin/env python
+
+# This script updates existing ECS Service. It is used when new version of Docker image has been released.
+
+import argparse
+import json
+import sys
+
+from build_utils import updateECSTask
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--cluster", type=str, default="dev", help="ECS Cluster name")
+parser.add_argument("--service", type=str, required=True, help="ECS Service name")
+parser.add_argument("image", nargs="?", type=str, help="Name of the Docker image")
+parser.add_argument("--profile", type=str, help="AWS User profile")
+parser.add_argument("--wait", action='store_true', default=False, help="Wait for ECS Service deployment to complete")
+parser.add_argument("--wait-timeout", type=int, default=90, help="Wait timeout")
+parser.add_argument("--retry-count", type=int, default=10, help="AWS API calls retry count")
+parser.add_argument("--memory", type=int, help="New memory allocation for container")
+parser.add_argument("--cpu", type=int, help="New CPU units allocation for container")
+parser.add_argument("--env_vars", type=json.loads, help="Environment Variables")
+parser.add_argument("--env_vars-update-mode", type=str, choices=['key', 'all'], default='all',
+                    help="Environment Variables")
+parser.add_argument("--cmd", type=str, help="Command")
+parser.add_argument("--log-options", type=str, help="Logger options in JSON format")
+parser.add_argument("--hide-events", action='store_true', default=False, help="Do not display ECS events")
+parser.add_argument("--task-definition", type=str, help="Existing Task Definition name or ARN")
+parser.add_argument("--container", type=str,
+                    help="Specific name of the container definition inside Task Definition")
+args = parser.parse_args()
+
+if args.image:
+    image_name = args.image
+else:
+    image_name = None
+
+try:
+    updateECSTask(cluster=args.cluster, serviceId=args.service, imageName=image_name, profileName=args.profile,
+                  wait=args.wait, waitTimeout=args.wait_timeout, memory=args.memory, cpu=args.cpu,
+                  env_vars=args.env_vars,
+                  waitRetryCount=args.retry_count,
+                  log_options=args.log_options, cmd=args.cmd, hideEvents=args.hide_events, name=args.task_definition,
+                  envUpdateMode=args.env_vars_update_mode, container_name=args.container)
+except Exception as e:
+    print "*** ERROR! : Failed to update service {0}! {1}".format(args.service, e.message)
+    print "*** ERROR! : arguments printout:        {}".format(args)
+    sys.exit(1)

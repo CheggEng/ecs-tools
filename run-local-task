@@ -1,0 +1,143 @@
+#!/usr/bin/env python
+
+# This script generates a command line to run a Docker image locally based on ECS Task Definition.
+
+import argparse
+
+import boto3
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--profile", type=str, help="AWS User profile")
+parser.add_argument("task_definition", type=str, nargs=1, help="Task Definition name or ARN")
+parser.add_argument("--container", type=str,
+                    help="Specific name of the container definition inside Task Definition")
+args = parser.parse_args()
+
+session = boto3.Session(profile_name=args.profile)
+client = session.client('ecs')
+describeTaskDefinition = client.describe_task_definition(taskDefinition=args.task_definition[0])
+taskDefinition = describeTaskDefinition["taskDefinition"]
+
+container_found = False
+for container in taskDefinition["containerDefinitions"]:
+    if not container_found and ((not args.container) or args.container == container["name"]):
+        container_found = True
+        image = container["image"]
+        ports = None
+        entry_point = None
+        cmd = None
+        envs = None
+        volumes = None
+        hostname = None
+        user = None
+        workdir = None
+        privileged = None
+        read_only_filesystem = None
+        network_mode = None
+        dns_servers = None
+        dns_search_domains = None
+        add_hosts = None
+        docker_security_opts = None
+        labels = None
+        memory = None
+        memory_reservation = None
+        log_configuration = None
+
+        if "portMappings" in container:
+            ports = container["portMappings"]
+        if "entryPoint" in container:
+            entry_point = container["entryPoint"]
+        if "command" in container:
+            cmd = container["command"]
+        if "environment" in container:
+            envs = container["environment"]
+        if "mountPoints" in container:
+            volumes = container["mountPoints"]
+        if "hostname" in container:
+            hostname = container["hostname"]
+        if "user" in container:
+            user = container["user"]
+        if "workingDirectory" in container:
+            workdir = container["workingDirectory"]
+        if "privileged" in container:
+            privileged = container["privileged"]
+        if "readonlyRootFilesystem" in container:
+            read_only_filesystem = container["readonlyRootFilesystem"]
+        if "networkMode" in container:
+            network_mode = taskDefinition["networkMode"]
+        if "dnsServers" in container:
+            dns_servers = container["dnsServers"]
+        if "dnsSearchDomains" in container:
+            dns_search_domains = container["dnsSearchDomains"]
+        if "extraHosts" in container:
+            add_hosts = container["extraHosts"]
+        if "dockerSecurityOptions" in container:
+            docker_security_opts = container["dockerSecurityOptions"]
+        if "dockerLabels" in container:
+            labels = container["dockerLabels"]
+        if "memory" in container:
+            memory = container["memory"]
+        if "memoryReservation" in container:
+            memory_reservation = container["memoryReservation"]
+        if "logConfiguration" in container:
+            log_configuration = container["logConfiguration"]
+
+        docker_run = "docker run "
+        if ports:
+            for port in ports:
+                docker_run += "-p {0}:{1}/{2} ".format(port["hostPort"], port["containerPort"], port["protocol"])
+        if entry_point:
+            docker_run += "--entrypoint {0} ".format(entry_point)
+        if envs:
+            for env in envs:
+                docker_run += "-e \"{0}={1}\" ".format(env["name"], env["value"])
+        if volumes:
+            for volume in volumes:
+                docker_run += "-v {0}:{1}{2} ".format(volume["sourceVolume"], volume["containerPath"],
+                                                      ":ro" if volume["readOnly"] else "")
+        if hostname:
+            docker_run += "--hostname {0} ".format(hostname)
+        if user:
+            docker_run += "--user {0} ".format(user)
+        if workdir:
+            docker_run += "--workdir {0} ".format(workdir)
+        if privileged:
+            docker_run += "--privileged "
+        if read_only_filesystem:
+            docker_run += "--read-only "
+        if network_mode:
+            docker_run += "--network {0} ".format(network_mode)
+        if dns_servers:
+            docker_run += "--dns {0} ".format(dns_servers)
+        if dns_search_domains:
+            docker_run += "--dns-search {0} ".format(dns_search_domains)
+        if memory:
+            docker_run += "--memory {}M ".format(memory)
+        if memory_reservation:
+            docker_run += "--memory-reservation {}M ".format(memory_reservation)
+        if add_hosts:
+            for host in add_hosts:
+                docker_run += "--add-host {0}:{1} ".format(host["hostname"], host["ipAddress"])
+        if docker_security_opts:
+            for opt in docker_security_opts:
+                docker_run += "--security-opt {0} ".format(opt)
+        if labels:
+            for label in labels.keys():
+                docker_run += "--label \"{0}={1}\" ".format(label, labels[label])
+        if log_configuration:
+            docker_run += "--log-driver {} ".format(log_configuration["logDriver"])
+            if "options" in log_configuration:
+                for key in log_configuration["options"].keys():
+                    docker_run += "--log-opt \"{0}={1}\" ".format(key, log_configuration["options"][key])
+        docker_run += image
+        if cmd:
+            for command in cmd:
+                docker_run += " {0}".format(command)
+        print docker_run
+if not container_found:
+    if args.container_name:
+        raise Exception(
+            "Container {0} not found in Task Definition {1}!".format(args.container_name, args.task_definition[0]))
+    else:
+        raise Exception(
+            "No containers found in Task Definition {0}!".format(args.task_definition[0]))

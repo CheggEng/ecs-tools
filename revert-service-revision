@@ -1,0 +1,58 @@
+#!/usr/bin/env python
+import argparse
+
+import boto3
+
+from build_utils import updateECSTask
+
+parser = argparse.ArgumentParser(
+    description="This script reverts ECS Service's Task Definition revision")
+parser.add_argument("--cluster", type=str, required=True, help="ECS cluster name")
+parser.add_argument("--service", type=str, required=True, help="ECS service name")
+parser.add_argument("--revision", type=int,
+                    help="Task Definition revision number. If not provided, service will be reverted to previous revision")
+parser.add_argument("--profile", type=str, help="AWS profile name")
+parser.add_argument("--find-active", action='store_true', default=False, help="Find active revision")
+parser.add_argument("--wait", action='store_true', default=False, help="Wait for ECS Service deployment to complete")
+parser.add_argument("--wait-timeout", type=int, default=90, help="Wait timeout")
+args = parser.parse_args()
+
+session = boto3.Session(profile_name=args.profile)
+cli = session.client('ecs')
+
+describe_service = cli.describe_services(cluster=args.cluster, services=[args.service])
+print "Current task definition: {}".format(describe_service["services"][0]["taskDefinition"].split("/")[-1])
+task_definition = describe_service["services"][0]["taskDefinition"].rsplit(":", 1)
+task_definition_family = task_definition[0]
+task_definition_revision = int(task_definition[-1])
+
+if args.revision:
+    task_definition_revision = args.revision
+else:
+    task_definition_revision -= 1
+
+tried = False
+found = False
+
+while task_definition_revision > 1 and not found and ((not tried) or args.find_active):
+    tried = True
+    new_task_definition = "{0}:{1}".format(task_definition_family, task_definition_revision)
+    print "Verifying task definition {}".format(new_task_definition.split("/")[-1])
+    describe_task_definition = cli.describe_task_definition(taskDefinition=new_task_definition)
+    if not describe_task_definition["taskDefinition"]:
+        print "Task definition {} not found!".format(new_task_definition)
+    else:
+        status = describe_task_definition["taskDefinition"]["status"]
+
+        if status != "ACTIVE":
+            print "Task definition {} is inactive!".format(new_task_definition.split("/")[-1])
+        else:
+            found = True
+            print "Task definition {} is ACTIVE".format(new_task_definition.split("/")[-1])
+            confirm = raw_input("\n\nRevert {0}/{1} to {2} ? (yes/no): ".format(args.cluster, args.service,
+                                                                                new_task_definition.split("/")[-1]))
+            if confirm.lower() in ["y", "yes"]:
+                updateECSTask(cluster=args.cluster, serviceId=args.service,
+                              wait=args.wait, waitTimeout=args.wait_timeout, name=new_task_definition)
+
+    task_definition_revision -= 1

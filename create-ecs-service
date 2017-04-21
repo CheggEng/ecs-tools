@@ -1,0 +1,280 @@
+#!/usr/bin/env python
+
+# This script registers Task Definition, creates Load Balancer and ECS Service in Amazon.
+# It adds username and image name as ELB tags.
+# Works with Docker Hub and Amazon ECR repository image name formats.
+# Run "create-ecs-service --help" for options
+
+import argparse
+import re
+from time import sleep
+
+from build_utils import *
+
+
+def execFlow(client, elb_client, functions, args, context):
+    for func in functions:
+        function = retry.all[func.upper()]
+        counter = 0
+        passed = False
+        message = None
+        while counter < args.retry_count:
+            try:
+                function(client, elb_client, args, context)
+                passed = True
+                break
+            except Exception as ex:
+                counter += 1
+                message = ex.message
+                print message
+                sleep(args.retry_interval)
+        if not passed:
+            raise Exception(
+                "FAILED! Could not execute function {name}: {message}".format(name=func,
+                                                                              message=message))
+
+
+@retry
+def register_task_definition(client, elb_client, args, context):
+    name = context["name"]
+    image_name = context["image-name"]
+    prefixed_name = context["prefixed-name"]
+    try:
+        task_definition = client.describe_task_definition(taskDefinition=prefixed_name)
+        task_definition_exists = True
+        task_definition_name = task_definition["taskDefinition"]["taskDefinitionArn"]
+        print "Task definition {name} exists".format(task_definition_name)
+    except Exception:
+        task_definition_exists = False
+
+    if not task_definition_exists:
+        print "Registering task definition"
+        container_definition = {
+            "name": prefixed_name,
+            "image": image_name,
+            "memory": args.memory,
+            "cpu": args.cpu,
+            "essential": True,
+            "portMappings": [
+                {
+                    "hostPort": args.port,
+                    "containerPort": args.container_port,
+                    "protocol": "tcp"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs"
+            }
+        }
+
+        if args.log_options:
+            container_definition["logConfiguration"]["options"] = json.loads(args.log_options)
+        else:
+            container_definition["logConfiguration"]["options"] = {
+                "awslogs-group": "devdockerlogs",
+                "awslogs-region": "us-west-2"
+            }
+        if args.cmd is not None and args.cmd != "":
+            container_definition["command"] = [args.cmd]
+
+        task_definition = client.register_task_definition(family=prefixed_name,
+                                                          containerDefinitions=[container_definition])
+        task_definition_name = task_definition["taskDefinition"]["taskDefinitionArn"]
+        print "Task definition registered: " + task_definition_name
+        context["task-definition-name"] = task_definition_name
+
+
+@retry
+def create_load_balancer(client, elb_client, args, context):
+    name = context["prefixed-name"]
+    user = context["user"]
+    image_name = context["image-name"]
+    subnets = re.split(", |,", args.subnets)
+    security_groups = re.split(", |,", args.security_groups)
+    print "Creating load balancer"
+    elb = elb_client.create_load_balancer(
+        LoadBalancerName=name,
+        Listeners=[
+            {
+                'Protocol': 'HTTP',
+                'LoadBalancerPort': args.elb_port,
+                'InstanceProtocol': 'HTTP',
+                'InstancePort': args.port
+            },
+        ],
+        Subnets=subnets,
+        SecurityGroups=security_groups,
+        Scheme='internal',
+        Tags=[
+            {
+                'Key': 'created-by',
+                'Value': user
+            },
+            {
+                'Key': 'image-name',
+                'Value': image_name
+            }
+        ]
+    )
+
+    elb_name = elb["DNSName"]
+    print "Load balancer created: " + elb_name
+
+    print "Configuring load balancer health check"
+    elb_client.configure_health_check(
+        LoadBalancerName=name,
+        HealthCheck={
+            'Target': "HTTP:{port}{uri}".format(port=args.port, uri=args.elb_health_check_uri),
+            'Interval': args.elb_health_check_interval,
+            'Timeout': args.elb_health_check_timeout,
+            'UnhealthyThreshold': args.elb_health_check_unhealthy_threshold,
+            'HealthyThreshold': args.elb_health_check_healthy_threshold
+        }
+    )
+    print "ELB configuration done for " + elb_name
+
+    log("Enabling Cross-Zone load balancing")
+    elb_client.modify_load_balancer_attributes(LoadBalancerName=name,
+                                               LoadBalancerAttributes={
+                                                   'CrossZoneLoadBalancing': {
+                                                       'Enabled': True
+                                                   }
+                                               }
+                                               )
+    log("Cross-Zone load balancing enabled for " + elb_name)
+    context["elb-dns-name"] = elb_name
+
+
+@retry
+def create_ecs_service(client, elb_client, args, context):
+    name = context["name"]
+    prefixed_name = context["prefixed-name"]
+    print "Creating ECS service"
+    task_definition_name = context["task-definition-name"]
+    service = client.create_service(cluster=args.cluster, serviceName=name, taskDefinition=task_definition_name,
+                                    desiredCount=args.desired_count, role=args.iam_role,
+                                    loadBalancers=[
+                                        {
+                                            'loadBalancerName': prefixed_name,
+                                            'containerName': prefixed_name,
+                                            'containerPort': args.container_port
+                                        },
+                                    ], deploymentConfiguration={
+            'maximumPercent': args.maximum_percent,
+            'minimumHealthyPercent': args.minimum_healthy_percent
+        })
+    print "ECS Service created: " + service["service"]["serviceArn"]
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--cluster", type=str, default="default", help="ECS Cluster name")
+parser.add_argument("--image", type=str, help="Container image name")
+parser.add_argument("--port", type=int, default=6033, help="Port sequence start number")
+parser.add_argument("--memory", type=int, default=1024, help="Allocated memory")
+parser.add_argument("--cpu", type=int, default=256, help="Allocated CPU units")
+parser.add_argument("--container-port", type=int, default=6033, help="Container port")
+parser.add_argument("--elb-port", type=int, help="LoadBalancer port")
+parser.add_argument("--profile", type=str, help="AWS user profile")
+parser.add_argument("--desired-count", type=int, default=1, help="Desired count of running containers")
+parser.add_argument("--minimum-healthy-percent", type=int, default=50, help="ECS Service minimum healthy percent")
+parser.add_argument("--maximum-percent", type=int, default=200, help="ECS Service maximum percent")
+parser.add_argument("--iam-role", type=str, default="ecsServiceRole", help="IAM Role")
+parser.add_argument("--elb-health-check-uri", type=str, default="/index.html", help="ELB health check URI")
+parser.add_argument("--elb-health-check-interval", type=int, default=60, help="ELB health check interval")
+parser.add_argument("--elb-health-check-timeout", type=int, default=59, help="ELB health check timeout")
+parser.add_argument("--elb-health-check-unhealthy-threshold", type=int, default=7,
+                    help="ELB health check unhealthy treshold")
+parser.add_argument("--elb-health-check-healthy-threshold", type=int, default=5,
+                    help="ELB health check healthy threshold")
+parser.add_argument("--retry-count", type=int, default=5, help="Retry count for each AWS API call")
+parser.add_argument("--retry-interval", type=int, default=1, help="Retry interval for AWS API calls (seconds)")
+parser.add_argument("-f", "--file", type=file, help="Input file with service name lines")
+parser.add_argument("--cluster-prefix", action='store_true', default=False,
+                    help="Use cluster name as a prefix for service names")
+parser.add_argument("--cmd", type=str, help="Container run command line")
+parser.add_argument("--user", type=str, help="Jenkins user")
+parser.add_argument("--subnets", type=str, default="subnet-e444238d, subnet-fb442392",
+                    help="Comma separated subnets list")
+parser.add_argument("--security-groups", type=str, default="sg-6ecfd202", help="Comma separated security groups list")
+parser.add_argument("--log-options", type=str, help="Logger options in JSON format")
+
+args = parser.parse_args()
+
+if args.elb_port is None:
+    args.elb_port = args.container_port
+
+session = boto3.Session(profile_name=args.profile)
+
+client = session.client('ecs')
+elb_client = session.client('elb')
+
+list_services = client.list_services(cluster=args.cluster, maxResults=100)
+registered_services = []
+while list_services != None:
+    for service in list_services["serviceArns"]:
+        registered_services.append(service.split(":service/")[1])
+    if "nextToken" in list_services and list_services["nextToken"] != None:
+        list_services = client.list_services(cluster=args.cluster, maxResults=100, nextToken=list_services["nextToken"])
+    else:
+        list_services = None
+
+names = []
+if args.file != None:
+    text = args.file.read()
+    args.file.close()
+    names = text.rstrip().split('\n')
+else:
+    names.append(args.image)
+
+functions = ["register_task_definition", "create_load_balancer", "create_ecs_service"]
+
+registered_prefixed_names = []
+
+for image_name in names:
+    image_name_no_user = image_name.split('/')[-1]
+    image_name_parts = image_name_no_user.split(':')
+    base_length = 32
+    length = base_length
+
+    service_name = image_name_parts[0][:length]
+    while not service_name[-1:].isalnum():
+        length = -1
+        service_name = image_name_parts[0][:length]
+
+    if service_name not in registered_services:
+        context = dict()
+        context["name"] = service_name
+        if args.cluster_prefix:
+            service_name = args.cluster + "-" + service_name
+
+        prefixed_name = service_name[:length]
+        length = base_length
+        while not prefixed_name[-1:].isalnum():
+            length = -1
+            prefixed_name = prefixed_name[:length]
+
+        cnt = 1
+        length = base_length - 1
+
+        while prefixed_name in registered_prefixed_names:
+            partial_name = prefixed_name[:length]
+            while not partial_name[-1:].isalnum():
+                length = -1
+                partial_name = prefixed_name[:length]
+
+            new_prefixed_name = partial_name + str(cnt)
+            log("Name {0} already registered. Trying {1}".format(prefixed_name, new_prefixed_name))
+            prefixed_name = new_prefixed_name
+            cnt += 1
+
+        registered_prefixed_names.append(prefixed_name)
+        context["prefixed-name"] = prefixed_name
+        context["image-name"] = image_name
+        context["user"] = args.user
+        print "Creating service {name}".format(name=context["name"])
+        execFlow(client=client, elb_client=elb_client, functions=functions, args=args, context=context)
+        print "Service creation SUCCESSFUL!"
+        args.port += 1
+    else:
+        print "Service {name} already exists!".format(name=service_name)
+

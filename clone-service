@@ -1,0 +1,77 @@
+#!/usr/bin/env python
+import argparse
+
+import boto3
+
+
+def clone(client, source_elb_names, dest_elb_names):
+    describe_elb = client.describe_load_balancers(LoadBalancerNames=source_elb_names)
+    tags = client.describe_tags(LoadBalancerNames=source_elb_names)["TagDescriptions"][0]["Tags"]
+
+    attributes = client.describe_load_balancer_attributes(LoadBalancerName=source_elb_names[0])[
+        "LoadBalancerAttributes"]
+
+    descriptor = describe_elb["LoadBalancerDescriptions"][0]
+
+    listeners = []
+
+    for listener in descriptor["ListenerDescriptions"]:
+        listeners.append(listener["Listener"])
+
+    client.create_load_balancer(LoadBalancerName=dest_elb_names[0],
+                                Listeners=listeners,
+                                Subnets=descriptor["Subnets"],
+                                SecurityGroups=descriptor["SecurityGroups"],
+                                Scheme=descriptor["Scheme"])
+
+    client.configure_health_check(LoadBalancerName=dest_elb_names[0], HealthCheck=descriptor["HealthCheck"])
+    client.modify_load_balancer_attributes(LoadBalancerName=dest_elb_names[0],
+                                           LoadBalancerAttributes=attributes)
+
+    if len(tags) > 0:
+        client.add_tags(LoadBalancerNames=dest_elb_names, Tags=tags)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--profile", type=str, help="AWS Profile")
+parser.add_argument("--cluster", type=str, required=True, help="ECS cluster name")
+parser.add_argument("--dest-cluster", type=str, help="Destination ECS cluster name")
+parser.add_argument("--service", type=str, required=True, help="ECS service name")
+parser.add_argument("--dest-name", type=str, required=True, help="Destination ECS service name")
+args = parser.parse_args()
+
+dest_cluster = args.dest_cluster if args.dest_cluster else args.cluster
+
+session = boto3.Session(profile_name=args.profile)
+client = session.client('ecs')
+elbclient = session.client('elb')
+
+services = client.describe_services(cluster=args.cluster, services=[args.service])
+if len(services["services"]) == 0:
+    raise Exception("Service {0} not found in cluster {1}".format(args.service, args.cluster))
+
+service = services["services"][0]
+
+if len(service["loadBalancers"]) == 0:
+    raise Exception(
+        "Service {0} in cluster {1} does not have Load Balancers assigned".format(args.service, args.cluster))
+
+elb_source = service["loadBalancers"][0]
+elb_name_source = elb_source["loadBalancerName"]
+elb_name_dest = args.dest_name
+service_name_dest = args.dest_name
+clone(elbclient, [elb_name_source], [elb_name_dest])
+print "ELB {0} copied from {1}".format(elb_name_dest, elb_name_source)
+
+service = client.create_service(cluster=dest_cluster, serviceName=service_name_dest,
+                                taskDefinition=service["taskDefinition"],
+                                desiredCount=0, role=service["roleArn"],
+                                loadBalancers=[
+                                    {
+                                        'loadBalancerName': elb_name_dest,
+                                        'containerName': elb_source["containerName"],
+                                        'containerPort': elb_source["containerPort"]
+                                    },
+                                ], deploymentConfiguration=service["deploymentConfiguration"])
+
+print "Service {0} created with ELB {1}".format(service_name_dest, elb_name_dest)
