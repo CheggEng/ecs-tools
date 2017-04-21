@@ -83,7 +83,7 @@ $ ./create-ecs-service --cluster test --profile default \
 --subnets subnet1,subnet2,subnet3 --security-groups default --log-options "{\"logDriver\":\"json-file\"}"
 ```
     
-###update-ecs-service
+### update-ecs-service
 Deploy new Docker image, update service configuration or simply bounce the service.
 This tool creates a new Task Definition revision, and update the ECS service to use this new revision.
 If configured, **update-ecs-service** will wait for the deployment to complete. While waiting, this tool will poll ECS service events, so you see deployment goes and what's exactly happening with the service.
@@ -122,7 +122,7 @@ $ ./update-ecs-service --cluster test --service mytestproject \
 --container primary_service --wait --wait-timeout 600 mytestproject:v2
 ```
     
-###delete-ecs-service
+### delete-ecs-service
 Remove an ECS service. This includes deletion of Elastic Load Balancer.
     
 ```
@@ -145,7 +145,7 @@ $ ./delete-ecs-service --cluster test --service mytestproject
 ```
 
 
-###clone-service
+### clone-service
 Clone an ECS service, including ELB cloning. New ECS service will point to same Task Definition.
     
 ```
@@ -165,7 +165,7 @@ $ ./clone-service --cluster test --service mytestproject \
 --dest-cluster dev --dest-name migratedtestproject 
 ```
     
-###revert-service-revision
+### revert-service-revision
 Rollback new deployment. This tool will search for previous Task Definition revision, and will update the ECS service to use this revision via **update-ecs-service**.
     
 ```
@@ -187,7 +187,7 @@ $ ./revert-service --cluster test --service mytestproject \
 --find-active --wait --wait-timeout 600
 ```    
     
-###run-local-task
+### run-local-task
 This tool is very useful for debugging. It scans the Task Definition, and converts it into a local **docker run** command.
     
 ```
